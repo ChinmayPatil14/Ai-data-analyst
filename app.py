@@ -275,8 +275,21 @@ def plan_node(state: AgentState) -> dict:
 
 def call_llm_node(state: AgentState) -> dict:
     plan_reminder = SystemMessage(content=f"Current plan: {state.get('plan', '')}")
-    response = llm_with_tools.invoke([plan_reminder] + state["messages"])
     trace = state.get("trace", [])
+    try:
+        response = llm_with_tools.invoke([plan_reminder] + state["messages"])
+    except Exception as e:
+        error_text = str(e)
+        if "rate limit" in error_text.lower() or "RateLimitError" in error_text:
+            friendly_msg = (
+                "I'm currently getting a lot of requests and hit a temporary rate limit. "
+                "Please wait about 30-60 seconds and try asking again."
+            )
+        else:
+            friendly_msg = f"I ran into an unexpected error while thinking: {error_text[:200]}"
+        trace = trace + [f"⚠️ **Error:** {friendly_msg}"]
+        return {"messages": [AIMessage(content=friendly_msg)], "trace": trace}
+
     if response.tool_calls:
         for call in response.tool_calls:
             trace = trace + [f"🔧 **Calling tool:** `{call['name']}({call['args']})`"]
@@ -371,6 +384,27 @@ def run_agent(question: str) -> tuple[str, list, object]:
     fig = current_fig["fig"]
     return answer, trace, fig
 
+def generate_example_questions(df: pd.DataFrame) -> dict:
+    """Build a dict of {chip_label: actual_question} based on the real columns in this dataset."""
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    categorical_cols = df.select_dtypes(include="object").columns.tolist()
+
+    questions = {}
+
+    questions["📋 Give me an overview"] = "Give me an overview of this data"
+    questions["🧹 Any missing data?"] = "Is there any missing data?"
+
+    if categorical_cols and numeric_cols:
+        cat, num = categorical_cols[0], numeric_cols[0]
+        questions[f"🏆 Highest avg {num} by {cat}"] = f"Which {cat} has the highest average {num}?"
+
+    if numeric_cols:
+        num = numeric_cols[0]
+        questions[f"🎯 Outliers in {num}?"] = f"Are there any outliers in {num}?"
+        questions[f"📊 Histogram of {num}"] = f"Show me a histogram of {num}"
+
+    return questions
+
 # ============ STREAMLIT UI ============
 
 if "chat_history" not in st.session_state:
@@ -444,24 +478,11 @@ if uploaded_file is not None:
             if fig is not None:
                 st.plotly_chart(fig, use_container_width=True)
 
-    # ---- Suggested question chips, right above the input ----
     st.markdown('<div class="suggestion-label">💡 Suggested questions</div>', unsafe_allow_html=True)
-    example_questions = [
-        "📋 Give me an overview",
-        "🏆 Highest average price by region",
-        "🎯 Any outliers in price?",
-        "📊 Show histogram of price",
-        "🧹 Any missing data?",
-    ]
-    question_map = {
-        "📋 Give me an overview": "Give me an overview of this data",
-        "🏆 Highest average price by region": "Which region has the highest average price?",
-        "🎯 Any outliers in price?": "Are there any outliers in price?",
-        "📊 Show histogram of price": "Show me a histogram of price",
-        "🧹 Any missing data?": "Is there any missing data?",
-    }
-    chip_cols = st.columns(len(example_questions))
-    for i, label in enumerate(example_questions):
+    question_map = generate_example_questions(df)
+    chip_labels = list(question_map.keys())
+    chip_cols = st.columns(len(chip_labels))
+    for i, label in enumerate(chip_labels):
         with chip_cols[i]:
             if st.button(label, key=f"chip_{i}", use_container_width=True):
                 clicked_example = question_map[label]
